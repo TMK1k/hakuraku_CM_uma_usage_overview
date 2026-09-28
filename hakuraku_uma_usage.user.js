@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Uma Usage Overview
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.2.1
 // @description  Show Current CM Uma usage statistics on Hakuraku
 // @author       TMK1k + Clanker
-// @match        https://hakuraku.moe/umalogs*
+// @match        https://hakuraku.moe/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=hakuraku.moe
 // @grant        none
 // @run-at       document-idle
