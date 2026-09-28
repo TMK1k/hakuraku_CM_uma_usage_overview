@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Uma Usage Overview
 // @namespace    http://tampermonkey.net/
-// @version      1.2
+// @version      1.0
 // @description  Show Current CM uma usage statistics on Hakuraku
 // @author       TMK1k + Clanker
 // @match        https://hakuraku.moe/umalogs*
