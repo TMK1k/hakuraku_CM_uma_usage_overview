@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Uma Usage Overview
 // @namespace    http://tampermonkey.net/
-// @version      1.2.2
+// @version      1.2.3
 // @description  Show Current CM Uma usage statistics on Hakuraku
 // @author       TMK1k + Clanker
 // @match        https://hakuraku.moe/*
@@ -351,8 +351,11 @@ async function showUsageOverview() {
 }
 
 function isUsageOverviewSelected() {
+  const params = new URLSearchParams(window.location.search);
+
   return (
-    new URLSearchParams(window.location.search).get("tab") === "usage-overview"
+    params.get("uma-tab") === "usage-overview" ||
+    params.get("tab") === "usage-overview"
   );
 }
 
@@ -369,9 +372,14 @@ function selectNativeTab(navigation, customButton) {
 function updateTabUrl(tabKey, historyMethod = "pushState") {
   const tabUrl = new URL(window.location.href);
 
-  if (tabKey === "introduction") {
+  if (tabKey === "usage-overview") {
+    tabUrl.searchParams.set("uma-tab", "usage-overview");
+    tabUrl.searchParams.delete("tab");
+  } else if (tabKey === "introduction") {
+    tabUrl.searchParams.delete("uma-tab");
     tabUrl.searchParams.delete("tab");
   } else {
+    tabUrl.searchParams.delete("uma-tab");
     tabUrl.searchParams.set("tab", tabKey);
   }
 
@@ -386,6 +394,40 @@ function scheduleTabUrlUpdate(tabKey, historyMethod = "pushState") {
   window.setTimeout(() => {
     updateTabUrl(tabKey, historyMethod);
   }, 0);
+}
+
+function getNativeTab(navigation, tabKey) {
+  return [...navigation.querySelectorAll('[role="tab"]')].find(
+    (tab) =>
+      tab.getAttribute("data-rr-ui-event-key") === tabKey ||
+      tab.id === `simdata-tabs-tab-${tabKey}`,
+  );
+}
+
+function getNativeTabPanel(tabContent, tabKey) {
+  return tabContent.querySelector(
+    `#simdata-tabs-tabpane-${CSS.escape(tabKey)}`,
+  );
+}
+
+function restoreNativeIntroduction(navigation, tabContent) {
+  tabContent.querySelectorAll('[role="tabpanel"]').forEach((panel) => {
+    panel.classList.remove("show", "active");
+  });
+
+  navigation.querySelectorAll('[role="tab"]').forEach((tab) => {
+    tab.classList.remove("active");
+    tab.setAttribute("aria-selected", "false");
+    tab.setAttribute("tabindex", "-1");
+  });
+
+  const introductionTab = getNativeTab(navigation, "introduction");
+  const introductionPanel = getNativeTabPanel(tabContent, "introduction");
+
+  introductionTab?.classList.add("active");
+  introductionTab?.setAttribute("aria-selected", "true");
+  introductionTab?.setAttribute("tabindex", "0");
+  introductionPanel?.classList.add("show", "active");
 }
 
 function removeIntroductionTabActiveClass(navigation) {
@@ -428,6 +470,14 @@ async function activateUsageOverview(button, content, navigation, tabContent) {
     console.error("Could not load usage overview:", error);
     content.textContent = "Could not load usage overview.";
   }
+}
+
+function deactivateUsageOverview(button, content, navigation, tabContent) {
+  button.classList.remove("active");
+  button.setAttribute("aria-selected", "false");
+  button.setAttribute("tabindex", "-1");
+  content.classList.remove("show", "active");
+  restoreNativeIntroduction(navigation, tabContent);
 }
 
 function bindDatasetSelector() {
@@ -517,10 +567,7 @@ function addUsageOverviewButton() {
         scheduleTabUrlUpdate(tabKey);
       }
 
-      button.classList.remove("active");
-      button.setAttribute("aria-selected", "false");
-      button.setAttribute("tabindex", "-1");
-      content.classList.remove("show", "active");
+      deactivateUsageOverview(button, content, navigation, tabContent);
     }
   });
 
@@ -532,10 +579,7 @@ function addUsageOverviewButton() {
       return;
     }
 
-    button.classList.remove("active");
-    button.setAttribute("aria-selected", "false");
-    button.setAttribute("tabindex", "-1");
-    content.classList.remove("show", "active");
+    deactivateUsageOverview(button, content, navigation, tabContent);
   });
 
   if (isUsageOverviewSelected()) {
