@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Uma Usage Overview
 // @namespace    http://tampermonkey.net/
-// @version      1.2.1
+// @version      1.2.2
 // @description  Show Current CM Uma usage statistics on Hakuraku
 // @author       TMK1k + Clanker
 // @match        https://hakuraku.moe/*
@@ -356,18 +356,71 @@ function isUsageOverviewSelected() {
   );
 }
 
+function selectNativeTab(navigation, customButton) {
+  const nativeTab = [...navigation.querySelectorAll('[role="tab"]')].find(
+    (tab) => tab !== customButton,
+  );
+
+  if (nativeTab instanceof HTMLElement) {
+    nativeTab.click();
+  }
+}
+
+function updateTabUrl(tabKey, historyMethod = "pushState") {
+  const tabUrl = new URL(window.location.href);
+
+  if (tabKey === "introduction") {
+    tabUrl.searchParams.delete("tab");
+  } else {
+    tabUrl.searchParams.set("tab", tabKey);
+  }
+
+  tabUrl.hash = "";
+
+  if (tabUrl.href !== window.location.href) {
+    window.history[historyMethod]({}, "", tabUrl.href);
+  }
+}
+
+function scheduleTabUrlUpdate(tabKey, historyMethod = "pushState") {
+  window.setTimeout(() => {
+    updateTabUrl(tabKey, historyMethod);
+  }, 0);
+}
+
+function removeIntroductionTabActiveClass(navigation) {
+  const introductionTab = navigation.querySelector(
+    "#simdata-tabs-tab-introduction",
+  );
+
+  introductionTab?.classList.remove("active");
+}
+
+function scheduleIntroductionTabReset(navigation) {
+  const endTime = performance.now() + 100;
+
+  function removeOnFrame(timestamp) {
+    removeIntroductionTabActiveClass(navigation);
+
+    if (timestamp < endTime) {
+      window.requestAnimationFrame(removeOnFrame);
+    }
+  }
+
+  window.requestAnimationFrame(removeOnFrame);
+}
+
 async function activateUsageOverview(button, content, navigation, tabContent) {
-  navigation.querySelectorAll('[role="tab"]').forEach((tab) => {
-    tab.classList.remove("active");
-    tab.setAttribute("aria-selected", "false");
-  });
   tabContent.querySelectorAll('[role="tabpanel"]').forEach((panel) => {
     panel.classList.remove("show", "active");
   });
 
   button.classList.add("active");
   button.setAttribute("aria-selected", "true");
+  button.setAttribute("tabindex", "0");
   content.classList.add("show", "active");
+  removeIntroductionTabActiveClass(navigation);
+  scheduleIntroductionTabReset(navigation);
 
   try {
     await showUsageOverview();
@@ -417,14 +470,18 @@ function addUsageOverviewButton() {
 
   const button = document.createElement("a");
   button.id = "uma-usage-overview-button";
-  button.className = "nav-link";
-  const usageUrl = new URL(window.location.href);
-  usageUrl.searchParams.set("tab", "usage-overview");
-  button.href = usageUrl.href;
+  button.className = "sim-section-link nav-link";
+  button.href = "#";
+  button.setAttribute("tabindex", "-1");
   button.textContent = "Usage Overview";
   button.setAttribute("role", "tab");
+  button.setAttribute("data-rr-ui-event-key", "usage-overview");
   button.setAttribute("aria-controls", "uma-usage-overview-content");
   button.setAttribute("aria-selected", "false");
+
+  const navItem = document.createElement("div");
+  navItem.className = "nav-item";
+  navItem.appendChild(button);
 
   const content = document.createElement("div");
   content.id = "uma-usage-overview-content";
@@ -433,7 +490,7 @@ function addUsageOverviewButton() {
   content.setAttribute("aria-labelledby", button.id);
 
   tabContent.appendChild(content);
-  navigation.appendChild(button);
+  navigation.appendChild(navItem);
 
   button.addEventListener("click", (event) => {
     event.preventDefault();
@@ -442,31 +499,48 @@ function addUsageOverviewButton() {
       return;
     }
 
-    window.history.pushState({}, "", button.href);
+    selectNativeTab(navigation, button);
+    scheduleTabUrlUpdate("usage-overview");
     void activateUsageOverview(button, content, navigation, tabContent);
   });
 
   navigation.addEventListener("click", (event) => {
-    const tab = event.target.closest('[role="tab"]');
+    const tab =
+      event.target instanceof Element
+        ? event.target.closest('[role="tab"]')
+        : null;
+
     if (tab && tab !== button) {
+      const tabKey = tab.getAttribute("data-rr-ui-event-key");
+
+      if (tabKey) {
+        scheduleTabUrlUpdate(tabKey);
+      }
+
       button.classList.remove("active");
       button.setAttribute("aria-selected", "false");
+      button.setAttribute("tabindex", "-1");
       content.classList.remove("show", "active");
     }
   });
 
   window.addEventListener("popstate", () => {
     if (isUsageOverviewSelected()) {
+      selectNativeTab(navigation, button);
+      scheduleTabUrlUpdate("usage-overview", "replaceState");
       void activateUsageOverview(button, content, navigation, tabContent);
       return;
     }
 
     button.classList.remove("active");
     button.setAttribute("aria-selected", "false");
+    button.setAttribute("tabindex", "-1");
     content.classList.remove("show", "active");
   });
 
   if (isUsageOverviewSelected()) {
+    selectNativeTab(navigation, button);
+    scheduleTabUrlUpdate("usage-overview", "replaceState");
     void activateUsageOverview(button, content, navigation, tabContent);
   }
 
