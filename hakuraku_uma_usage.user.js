@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Uma Usage Overview
 // @namespace    http://tampermonkey.net/
-// @version      1.2.3
+// @version      1.2.4
 // @description  Show Current CM Uma usage statistics on Hakuraku
 // @author       TMK1k + Clanker
 // @match        https://hakuraku.moe/*
@@ -472,12 +472,21 @@ async function activateUsageOverview(button, content, navigation, tabContent) {
   }
 }
 
-function deactivateUsageOverview(button, content, navigation, tabContent) {
+function deactivateUsageOverview(
+  button,
+  content,
+  navigation,
+  tabContent,
+  restoreIntroduction = false,
+) {
   button.classList.remove("active");
   button.setAttribute("aria-selected", "false");
   button.setAttribute("tabindex", "-1");
   content.classList.remove("show", "active");
-  restoreNativeIntroduction(navigation, tabContent);
+
+  if (restoreIntroduction) {
+    restoreNativeIntroduction(navigation, tabContent);
+  }
 }
 
 function bindDatasetSelector() {
@@ -567,7 +576,13 @@ function addUsageOverviewButton() {
         scheduleTabUrlUpdate(tabKey);
       }
 
-      deactivateUsageOverview(button, content, navigation, tabContent);
+      deactivateUsageOverview(
+        button,
+        content,
+        navigation,
+        tabContent,
+        tabKey === "introduction",
+      );
     }
   });
 
@@ -579,7 +594,16 @@ function addUsageOverviewButton() {
       return;
     }
 
-    deactivateUsageOverview(button, content, navigation, tabContent);
+    const tabKey =
+      new URLSearchParams(window.location.search).get("tab") ?? "introduction";
+
+    deactivateUsageOverview(
+      button,
+      content,
+      navigation,
+      tabContent,
+      tabKey === "introduction",
+    );
   });
 
   if (isUsageOverviewSelected()) {
