@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Uma Usage Overview
 // @namespace    http://tampermonkey.net/
-// @version      1.2.4
+// @version      1.3.0
 // @description  Show Current CM Uma usage statistics on Hakuraku
 // @author       TMK1k + Clanker
 // @match        https://hakuraku.moe/*
@@ -10,6 +10,7 @@
 // @run-at       document-idle
 // ==/UserScript==
 
+/** Returns the snapshot selected by Hakuraku's dataset dropdown. */
 function getSelectedSnapshot() {
   const selector = document.querySelector(".sim-dataset-select");
   const selectedSnapshot = selector?.selectedOptions?.[0]?.value?.trim();
@@ -17,44 +18,177 @@ function getSelectedSnapshot() {
   return selectedSnapshot || null;
 }
 
-async function showUsageOverview() {
-  let snapshot = getSelectedSnapshot();
+/** Extracts the CM number used to choose the correct API format. */
+function getSnapshotCmNumber(snapshot) {
+  const match = /^cm(\d+)-/i.exec(snapshot);
 
-  if (!snapshot) {
-    const manifestResponse = await fetch("/api/simdata/manifest");
+  return match ? Number(match[1]) : null;
+}
 
-    if (!manifestResponse.ok) {
+/** Gets the selected snapshot, or discovers the newest snapshot from the manifest. */
+async function getSnapshot() {
+  const selectedSnapshot = getSelectedSnapshot();
+
+  if (selectedSnapshot) return selectedSnapshot;
+
+  const manifestResponse = await fetch("/api/simdata/manifest");
+
+  if (!manifestResponse.ok) {
+    throw new Error(
+      `Manifest request failed: ${manifestResponse.status} ${manifestResponse.statusText}`,
+    );
+  }
+
+  const manifestData = await manifestResponse.json();
+  const manifestText = JSON.stringify(manifestData);
+  const snapshots = [
+    ...new Set(manifestText.match(/cm\d+-\d{4}-\d{2}-\d{2}/gi) ?? []),
+  ];
+
+  snapshots.sort((a, b) => b.localeCompare(a));
+
+  if (!snapshots[0]) {
+    console.log("Manifest response:", manifestData);
+    throw new Error("Could not find a snapshot ID in the manifest.");
+  }
+
+  return snapshots[0];
+}
+
+/** Recursively finds every `pairs` collection in a legacy summary response. */
+function getPairCollections(value, collections = []) {
+  if (!value || typeof value !== "object") return collections;
+
+  if (Object.prototype.hasOwnProperty.call(value, "pairs")) {
+    collections.push(value.pairs);
+  }
+
+  Object.values(value).forEach((child) =>
+    getPairCollections(child, collections),
+  );
+
+  return collections;
+}
+
+/** Converts array or numeric-keyed pair collections into one flat array. */
+function getPairsFromCollections(collections) {
+  return collections.flatMap((collection) =>
+    Array.isArray(collection) ? collection : Object.values(collection ?? {}),
+  );
+}
+
+/** Builds a card-ID lookup used to label new API usage entries. */
+function getCardMetadata(summaryData) {
+  const cards = summaryData?.cards;
+
+  if (!cards || typeof cards !== "object") return new Map();
+
+  return new Map(Object.entries(cards));
+}
+
+/**
+ * Removes debuffers, combines style entries, and calculates player shares.
+ * Legacy pairs use `runners`; CM20+ pairs use `players`.
+ */
+function aggregateUsage(
+  pairs,
+  totalPlayers,
+  isNewApi,
+  cardMetadata = new Map(),
+) {
+  const totals = new Map();
+
+  for (const pair of pairs) {
+    if (!pair || Number(pair.style) === 6) continue;
+
+    const players = Number(isNewApi ? pair.players : pair.runners);
+
+    if (!Number.isFinite(players)) continue;
+
+    const card = pair.card ?? "";
+    const metadata = cardMetadata.get(String(card)) ?? {};
+    const chara = pair.chara ?? metadata.chara ?? "";
+    const name =
+      pair.name ?? metadata.name ?? (chara ? `Chara ${chara}` : "Unknown");
+    const outfit =
+      pair.outfit ?? metadata.outfit ?? (card ? `Card ${card}` : "");
+    const key = isNewApi
+      ? JSON.stringify([chara, card])
+      : JSON.stringify([name, outfit]);
+    const existing = totals.get(key) ?? {
+      card,
+      chara,
+      name,
+      outfit,
+      players: 0,
+    };
+
+    existing.players += players;
+    totals.set(key, existing);
+  }
+
+  return [...totals.values()]
+    .map((entry) => ({
+      ...entry,
+      share: entry.players / totalPlayers,
+    }))
+    .sort((a, b) => b.players - a.players)
+    .map((entry, index) => ({
+      ...entry,
+      rank: index + 1,
+      percentage: `${(entry.share * 100).toFixed(2)}%`,
+    }));
+}
+
+/** Loads and normalizes either the legacy or CM20+ usage response. */
+async function fetchUsageData(snapshot) {
+  const cmNumber = getSnapshotCmNumber(snapshot);
+
+  if (cmNumber === null) {
+    throw new Error(`Could not determine CM number from snapshot: ${snapshot}`);
+  }
+
+  if (cmNumber >= 20) {
+    const [usageResponse, summaryResponse] = await Promise.all([
+      fetch(`/api/simdata/snapshots/${snapshot}/uma-usage`),
+      fetch(`/api/simdata/snapshots/${snapshot}/summary`),
+    ]);
+
+    if (!usageResponse.ok) {
       throw new Error(
-        `Manifest request failed: ${manifestResponse.status} ${manifestResponse.statusText}`,
+        `Uma usage request failed: ${usageResponse.status} ${usageResponse.statusText}`,
       );
     }
 
-    const manifestData = await manifestResponse.json();
-
-    /*
-     * Search the complete manifest for snapshot IDs.
-     * This works even if the manifest structure changes or IDs are nested.
-     */
-    const manifestText = JSON.stringify(manifestData);
-
-    const snapshots = [
-      ...new Set(manifestText.match(/cm\d+-\d{4}-\d{2}-\d{2}/gi) ?? []),
-    ];
-
-    /*
-     * ISO-formatted dates sort correctly as text.
-     */
-    snapshots.sort((a, b) => b.localeCompare(a));
-    snapshot = snapshots[0];
-
-    if (!snapshot) {
-      console.log("Manifest response:", manifestData);
-
-      throw new Error("Could not find a snapshot ID in the manifest.");
+    if (!summaryResponse.ok) {
+      throw new Error(
+        `Summary request failed: ${summaryResponse.status} ${summaryResponse.statusText}`,
+      );
     }
-  }
 
-  console.log(`Using snapshot: ${snapshot}`);
+    const [data, summaryData] = await Promise.all([
+      usageResponse.json(),
+      summaryResponse.json(),
+    ]);
+    const totalPlayers = Number(data.totalPlayers);
+
+    if (!Number.isFinite(totalPlayers) || totalPlayers <= 0) {
+      console.log("Uma usage response:", data);
+      throw new Error(
+        `Could not find a valid totalPlayers value. Received: ${data.totalPlayers}`,
+      );
+    }
+
+    return {
+      totalPlayers,
+      result: aggregateUsage(
+        getPairsFromCollections([data.pairs ?? []]),
+        totalPlayers,
+        true,
+        getCardMetadata(summaryData),
+      ),
+    };
+  }
 
   const [summaryResponse, teamsResponse] = await Promise.all([
     fetch(`/api/simdata/snapshots/${snapshot}/summary`),
@@ -77,80 +211,46 @@ async function showUsageOverview() {
     summaryResponse.json(),
     teamsResponse.json(),
   ]);
+  const totalPlayers = Number(teamsData.totalTeams);
 
-  const totalTeams = Number(teamsData.totalTeams);
-
-  if (!Number.isFinite(totalTeams) || totalTeams <= 0) {
+  if (!Number.isFinite(totalPlayers) || totalPlayers <= 0) {
     console.log("Teams response:", teamsData);
-
     throw new Error(
       `Could not find a valid totalTeams value. Received: ${teamsData.totalTeams}`,
     );
   }
 
-  const pairCollections = [];
+  return {
+    totalPlayers,
+    result: aggregateUsage(
+      getPairsFromCollections(getPairCollections(summaryData)),
+      totalPlayers,
+      false,
+    ),
+  };
+}
 
-  function findPairs(value) {
-    if (!value || typeof value !== "object") return;
+// Prevent repeated tab or dataset events from issuing duplicate requests.
+const usageDataCache = new Map();
 
-    if (Object.prototype.hasOwnProperty.call(value, "pairs")) {
-      pairCollections.push(value.pairs);
-    }
-
-    Object.values(value).forEach(findPairs);
+/** Returns cached or in-flight usage data for a snapshot. */
+function loadUsageData(snapshot) {
+  if (!usageDataCache.has(snapshot)) {
+    const request = fetchUsageData(snapshot);
+    usageDataCache.set(snapshot, request);
+    request.catch(() => usageDataCache.delete(snapshot));
   }
 
-  findPairs(summaryData);
+  return usageDataCache.get(snapshot);
+}
 
-  const pairs = pairCollections.flatMap((collection) =>
-    Array.isArray(collection) ? collection : Object.values(collection ?? {}),
-  );
+/** Rebuilds the custom tab contents from the normalized usage result. */
+async function showUsageOverview() {
+  const snapshot = await getSnapshot();
 
-  const totals = new Map();
+  console.log(`Using snapshot: ${snapshot}`);
 
-  for (const pair of pairs) {
-    if (!pair || Number(pair.style) === 6) continue;
-
-    const runners = Number(pair.runners);
-
-    if (!Number.isFinite(runners)) continue;
-
-    const name = pair.name ?? "Unknown";
-    const outfit = pair.outfit ?? "";
-    const key = JSON.stringify([name, outfit]);
-
-    const existing = totals.get(key) ?? {
-      card: pair.card ?? "",
-      chara: pair.chara ?? "",
-      name,
-      outfit,
-      runners: 0,
-    };
-
-    existing.runners += runners;
-    totals.set(key, existing);
-  }
-
-  const result = [...totals.values()]
-    .map((entry) => ({
-      card: entry.card,
-      chara: entry.chara,
-      name: entry.name,
-      outfit: entry.outfit,
-      runners: entry.runners,
-      share: entry.runners / totalTeams,
-    }))
-    .sort((a, b) => b.runners - a.runners)
-    .map((entry, index) => ({
-      card: entry.card,
-      chara: entry.chara,
-      rank: index + 1,
-      name: entry.name,
-      outfit: entry.outfit,
-      runners: entry.runners,
-      percentage: `${(entry.share * 100).toFixed(2)}%`,
-      share: entry.share,
-    }));
+  const { totalPlayers, result } = await loadUsageData(snapshot);
 
   const content = document.getElementById("uma-usage-overview-content");
 
@@ -192,7 +292,7 @@ async function showUsageOverview() {
   const subtitle = document.createElement("div");
   subtitle.textContent =
     `${result.length.toLocaleString()} entries | ` +
-    `${totalTeams.toLocaleString()} total teams | ` +
+    `${totalPlayers.toLocaleString()} total players | ` +
     `Debuffers excluded`;
 
   Object.assign(subtitle.style, {
@@ -231,7 +331,7 @@ async function showUsageOverview() {
     ["Image", "center"],
     ["Name", "left"],
     ["Outfit", "left"],
-    ["Runners", "right"],
+    ["Players", "right"],
     ["Percentage", "right"],
   ];
 
@@ -272,7 +372,7 @@ async function showUsageOverview() {
 
     const values = [
       [row.outfit, "left"],
-      [row.runners.toLocaleString(), "right"],
+      [row.players.toLocaleString(), "right"],
       [row.percentage, "right"],
     ];
 
@@ -340,16 +440,17 @@ async function showUsageOverview() {
    */
   tableContainer.scrollTop = 0;
 
-  console.log(`Total teams: ${totalTeams.toLocaleString()}`);
+  console.log(`Total players: ${totalPlayers.toLocaleString()}`);
   console.log(`Displayed entries: ${result.length}`);
   console.log("The table is displayed over the webpage.");
 
   return {
-    totalTeams,
+    totalPlayers,
     result,
   };
 }
 
+/** Checks whether the custom usage tab is selected in the current URL. */
 function isUsageOverviewSelected() {
   const params = new URLSearchParams(window.location.search);
 
@@ -359,6 +460,7 @@ function isUsageOverviewSelected() {
   );
 }
 
+/** Clicks a native tab so Hakuraku's own tab state stays synchronized. */
 function selectNativeTab(navigation, customButton) {
   const nativeTab = [...navigation.querySelectorAll('[role="tab"]')].find(
     (tab) => tab !== customButton,
@@ -369,6 +471,7 @@ function selectNativeTab(navigation, customButton) {
   }
 }
 
+/** Writes the selected native or custom tab into the query string. */
 function updateTabUrl(tabKey, historyMethod = "pushState") {
   const tabUrl = new URL(window.location.href);
 
@@ -390,12 +493,14 @@ function updateTabUrl(tabKey, historyMethod = "pushState") {
   }
 }
 
+/** Defers URL changes until after the current tab event has completed. */
 function scheduleTabUrlUpdate(tabKey, historyMethod = "pushState") {
   window.setTimeout(() => {
     updateTabUrl(tabKey, historyMethod);
   }, 0);
 }
 
+/** Finds a native tab by its React-Bootstrap event key or generated ID. */
 function getNativeTab(navigation, tabKey) {
   return [...navigation.querySelectorAll('[role="tab"]')].find(
     (tab) =>
@@ -404,12 +509,14 @@ function getNativeTab(navigation, tabKey) {
   );
 }
 
+/** Finds the native panel associated with a tab key. */
 function getNativeTabPanel(tabContent, tabKey) {
   return tabContent.querySelector(
     `#simdata-tabs-tabpane-${CSS.escape(tabKey)}`,
   );
 }
 
+/** Restores Hakuraku's introduction tab after leaving the custom tab. */
 function restoreNativeIntroduction(navigation, tabContent) {
   tabContent.querySelectorAll('[role="tabpanel"]').forEach((panel) => {
     panel.classList.remove("show", "active");
@@ -430,6 +537,7 @@ function restoreNativeIntroduction(navigation, tabContent) {
   introductionPanel?.classList.add("show", "active");
 }
 
+/** Removes a transient native active class that can override custom tab state. */
 function removeIntroductionTabActiveClass(navigation) {
   const introductionTab = navigation.querySelector(
     "#simdata-tabs-tab-introduction",
@@ -438,6 +546,7 @@ function removeIntroductionTabActiveClass(navigation) {
   introductionTab?.classList.remove("active");
 }
 
+/** Reapplies the custom tab state briefly while native tab updates settle. */
 function scheduleIntroductionTabReset(navigation) {
   const endTime = performance.now() + 100;
 
@@ -452,6 +561,7 @@ function scheduleIntroductionTabReset(navigation) {
   window.requestAnimationFrame(removeOnFrame);
 }
 
+/** Activates the custom tab and loads its current snapshot data. */
 async function activateUsageOverview(button, content, navigation, tabContent) {
   tabContent.querySelectorAll('[role="tabpanel"]').forEach((panel) => {
     panel.classList.remove("show", "active");
@@ -472,6 +582,7 @@ async function activateUsageOverview(button, content, navigation, tabContent) {
   }
 }
 
+/** Deactivates the custom tab and optionally restores the introduction tab. */
 function deactivateUsageOverview(
   button,
   content,
@@ -489,6 +600,7 @@ function deactivateUsageOverview(
   }
 }
 
+/** Reloads the usage tab when Hakuraku replaces the selected dataset. */
 function bindDatasetSelector() {
   const selector = document.querySelector(".sim-dataset-select");
 
@@ -513,6 +625,7 @@ function bindDatasetSelector() {
   });
 }
 
+/** Installs the custom tab once the native navigation has rendered. */
 function addUsageOverviewButton() {
   const navigation = document.querySelector(".sim-section-nav.nav.nav-tabs");
   const tabContent = document.querySelector(".tab-content");
